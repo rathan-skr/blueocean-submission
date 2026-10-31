@@ -25,7 +25,8 @@ async def lifespan(app):
     setup_logging("api")
     db.bootstrap()
     pool = AsyncConnectionPool(config.DATABASE_URL, min_size=4, max_size=20, open=False,
-                               kwargs={"autocommit": True, "application_name": "api"}, timeout=5)
+                               kwargs={"autocommit": True, "application_name": "api",
+                                       "options": "-c timezone=UTC"}, timeout=5)   # timestamps out in UTC
     await pool.open(wait=False)
     rds = aioredis.from_url(config.REDIS_URL, socket_timeout=1, socket_connect_timeout=1)
     yield
@@ -184,6 +185,12 @@ def main():
     import uvicorn
     uvicorn.run("settle.api:app", host="0.0.0.0", port=config.API_PORT, log_level="warning", access_log=False)
 
+
+
+# The settlement console (/ui) and its read-only JSON endpoints live in ui.py.
+from .ui import router as _ui_router  # noqa: E402  (imported last: ui.py uses q() defined above)
+
+app.include_router(_ui_router)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settlement console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#15233F; --paper:#F3F6FA; --card:#FFFFFF; --rule:#D6DEE8; --muted:#5B677A;
+  --note:#1F7A5C; --note-bg:#E3F2EC; --amber:#9A6412; --amber-bg:#FBF0DC; --red:#B42318; --red-bg:#FBE7E5;
+  --link:#2B59C3; --focus:#2B59C3; --hl:#FFF4C2;
+  --sans:"Public Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --ink:#E6ECF5; --paper:#0F1726; --card:#16213A; --rule:#2A3856; --muted:#9AA8BF;
+  --note:#5CC9A1; --note-bg:#14362C; --amber:#F0B45A; --amber-bg:#3A2C12; --red:#F28B82; --red-bg:#3D1C1A;
+  --link:#8DB1FF; --focus:#8DB1FF; --hl:#3A3415;}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans)}
+a{color:var(--link)}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.mono{font-family:var(--mono);font-size:.86em}
+.muted{color:var(--muted)}
+header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding:18px 24px 6px}
+header h1{font-size:22px;font-weight:700;margin:0;letter-spacing:-.01em}
+header .conn{font-size:13px;color:var(--muted)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px;vertical-align:1px}
+.dot.ok{background:var(--note)} .dot.bad{background:var(--red)}
+
+/* ---- the pipeline strip (hero) ---- */
+.strip{position:sticky;top:0;z-index:5;background:var(--paper);padding:10px 24px 14px;border-bottom:1px solid var(--rule)}
+.track{position:relative;display:grid;grid-template-columns:repeat(7,minmax(120px,1fr));gap:10px;overflow-x:auto;padding:4px 2px 18px}
+.wire{position:absolute;left:60px;right:60px;bottom:6px;height:2px;background:var(--rule);pointer-events:none}
+.packet{position:absolute;bottom:2px;width:10px;height:10px;border-radius:50%;background:var(--note);left:60px;opacity:0}
+@media (prefers-reduced-motion:no-preference){.packet.go{animation:flow 2.2s linear}}
+@keyframes flow{0%{left:60px;opacity:1}92%{opacity:1}100%{left:calc(100% - 70px);opacity:0}}
+.stage{position:relative;background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:10px 12px 10px;
+  text-align:left;cursor:pointer;min-width:120px}
+.stage:hover{border-color:var(--muted)}
+.stage.lit{border-color:var(--note);box-shadow:0 0 0 3px var(--note-bg)}
+.stage .who{font-size:12px;color:var(--muted);display:flex;justify-content:space-between;gap:4px 6px;flex-wrap:wrap}
+.stage .name{font-weight:600;font-size:15px;margin:1px 0 4px}
+.stage .big{font-size:22px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stage .sub{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;min-height:18px}
+.stage.given .who::after{content:"harness";border:1px solid var(--rule);border-radius:999px;padding:0 6px;font-size:11px}
+.stage.warn{border-color:var(--amber)} .stage.bad{border-color:var(--red)}
+
+/* ---- tabs ---- */
+nav.tabs{display:flex;gap:4px;padding:14px 24px 0;flex-wrap:wrap}
+nav.tabs button{background:none;border:0;border-bottom:3px solid transparent;padding:8px 12px;cursor:pointer;color:var(--muted);font-weight:600}
+nav.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--ink)}
+main{padding:18px 24px 60px;max-width:1280px}
+section[hidden]{display:none}
+h2{font-size:18px;margin:0 0 4px} h3{font-size:15px;margin:18px 0 8px}
+.lead{color:var(--muted);margin:0 0 16px;max-width:75ch}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px}
+.grid-m{display:grid;grid-template-columns:300px minmax(0,1fr);gap:22px}
+@media (max-width:900px){.grid2,.grid-m{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:14px 16px}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600}
+td.num,th.num{text-align:right}
+tr.click{cursor:pointer} tr.click:hover td{background:var(--paper)}
+tr.sel td{background:var(--hl)}
+.pill{display:inline-block;border-radius:999px;padding:0 8px;font-size:12px;font-weight:600;white-space:nowrap}
+.s-paid,.r-applied{background:var(--note-bg);color:var(--note)}
+.s-pending,.s-sending,.r-ignored{background:var(--paper);color:var(--muted);border:1px solid var(--rule)}
+.s-unknown{background:var(--amber-bg);color:var(--amber)}
+.s-failed,.s-rejected,.r-rejected{background:var(--red-bg);color:var(--red)}
+.parts{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px}
+.part{border:1px solid var(--rule);border-radius:8px;padding:6px 8px;font-size:12px;background:var(--card)}
+.part b{font-size:14px} .part.idle{opacity:.55} .part.lag{border-color:var(--amber)} .part.orphan{border-color:var(--red)}
+.bar{display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--paper);border:1px solid var(--rule);margin:6px 0 10px}
+.bar span{display:block}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:13px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:14px}
+.kv dt{color:var(--muted)} .kv dd{margin:0;font-variant-numeric:tabular-nums}
+.money{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}
+.money div{border:1px solid var(--rule);border-radius:8px;padding:8px 10px}
+.money b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+input[type=text],input[type=search],input[type=datetime-local],select{border:1px solid var(--rule);background:var(--card);border-radius:6px;padding:6px 8px;width:100%}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{border:1px solid var(--ink);background:var(--ink);color:var(--paper);border-radius:6px;padding:6px 12px;cursor:pointer;font-weight:600}
+.btn.ghost{background:transparent;color:var(--ink)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.chips button{border:1px solid var(--rule);background:var(--card);border-radius:999px;padding:2px 10px;cursor:pointer}
+.chips button[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.timeline{list-style:none;margin:0;padding:0;border-left:2px solid var(--rule)}
+.timeline li{position:relative;padding:4px 0 10px 16px}
+.timeline li::before{content:"";position:absolute;left:-6px;top:10px;width:10px;height:10px;border-radius:50%;background:var(--rule)}
+.timeline li.good::before{background:var(--note)} .timeline li.amb::before{background:var(--amber)} .timeline li.no::before{background:var(--muted)} .timeline li.bad::before{background:var(--red)}
+.sm{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:13px;margin:8px 0 12px}
+.sm span{border:1px solid var(--rule);border-radius:6px;padding:2px 8px}
+.sm span.on{border-color:var(--ink);background:var(--ink);color:var(--paper)}
+.why{font-size:13px;color:var(--muted);max-width:70ch}
+.checks li{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--rule);list-style:none}
+.checks{padding:0;margin:0}
+.checks .mark{width:22px;font-weight:700} .checks .ok{color:var(--note)} .checks .no{color:var(--red)}
+pre.cmd{background:var(--paper);border:1px solid var(--rule);border-radius:6px;padding:8px 10px;margin:4px 0 2px;overflow-x:auto;font:13px/1.45 var(--mono)}
+.cmdrow{display:flex;justify-content:space-between;align-items:center;gap:8px}
+/* learn */
+.steps{display:grid;grid-template-columns:220px minmax(0,1fr);gap:22px}
+@media (max-width:900px){.steps{grid-template-columns:1fr}}
+.steplist{list-style:none;padding:0;margin:0;counter-reset:s}
+.steplist li{counter-increment:s;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:14px}
+.steplist li::before{content:counter(s);display:inline-block;width:22px;color:var(--muted);font-variant-numeric:tabular-nums}
+.steplist li[aria-current=true]{background:var(--ink);color:var(--paper)} .steplist li[aria-current=true]::before{color:var(--paper)}
+.stepbody p{max-width:70ch}
+.code{border-left:3px solid var(--note);padding:2px 0 2px 10px;margin:10px 0;font-size:14px}
+/* drawer */
+.drawer{position:fixed;right:0;top:0;bottom:0;width:min(520px,100%);background:var(--card);border-left:1px solid var(--rule);
+  padding:20px 22px;overflow-y:auto;z-index:20;transform:translateX(100%);visibility:hidden;transition:transform .2s,visibility .2s}
+.drawer.open{transform:none;visibility:visible;box-shadow:-12px 0 30px rgba(10,20,40,.12)}
+@media (max-width:700px){.strip{position:static}}
+@media (prefers-reduced-motion:reduce){.drawer{transition:none}}
+.drawer h2{font-size:20px}
+.drawer ul{padding-left:18px}
+.close{float:right}
+.empty{color:var(--muted);padding:12px 0}
+.err{color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Settlement console</h1>
+  <span class="conn" id="conn"><span class="dot"></span>connecting…</span>
+</header>
+
+<div class="strip" aria-label="Pipeline, live">
+  <div class="track" id="track">
+    <div class="wire"></div><div class="packet" id="packet"></div>
+  </div>
+</div>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-tab="overview">Overview</button>
+  <button role="tab" aria-selected="false" data-tab="merchants">Merchants</button>
+  <button role="tab" aria-selected="false" data-tab="payouts">Payouts</button>
+  <button role="tab" aria-selected="false" data-tab="learn">Learn the flow</button>
+  <button role="tab" aria-selected="false" data-tab="test">Test</button>
+</nav>
+
+<main>
+<!-- OVERVIEW -->
+<section id="tab-overview">
+  <h2>What the system is doing right now</h2>
+  <p class="lead">Refreshes every 3 seconds. Click any stage in the strip above to see how it works and where its code lives.</p>
+  <div class="grid2">
+    <div>
+      <div class="panel">
+        <h3 style="margin-top:0">Broker partitions and their consumers</h3>
+        <p class="why">Each merchant's events always go to the same partition, so they stay in order. Each partition is owned by exactly one consumer at a time; "lag" is how many messages are waiting.</p>
+        <div class="parts" id="parts"></div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <h3 style="margin-top:0">Channels behind</h3>
+        <p class="why">Received = in order from the gateway. Applied = in the ledger. A receive gap means the reader is waiting for a resend.</p>
+        <div id="behind"></div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h3 style="margin-top:0">Payouts by state</h3>
+        <div class="bar" id="pbar"></div><div class="legend" id="plegend"></div>
+        <p class="why">"Unknown" means the bank may have paid it (a 502 or a timeout). It is never sent again blindly: after 18 s the bank is searched, then it becomes paid, or is resent with a new key.</p>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <h3 style="margin-top:0">Bank responses</h3>
+        <div id="bank"></div>
+      </div>
+      <div class="panel" style="margin-top:16px">
+        <h3 style="margin-top:0">Session</h3>
+        <dl class="kv" id="session"></dl>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MERCHANTS -->
+<section id="tab-merchants" hidden>
+  <h2>Merchants</h2>
+  <p class="lead">Pick a merchant to see its balance, its balance at any past moment, and every event in its journal with the rule's verdict.</p>
+  <div class="grid-m">
+    <div>
+      <div class="row" style="margin-bottom:8px">
+        <input type="search" id="mq" placeholder="Search, e.g. M-0042" aria-label="Search merchants">
+        <select id="morder" aria-label="Sort merchants">
+          <option value="id">By id</option><option value="busy">Most events</option>
+          <option value="recent">Recently changed</option><option value="settled">Largest balance</option>
+        </select>
+      </div>
+      <div class="panel" style="padding:4px 8px;max-height:640px;overflow-y:auto"><table><tbody id="mlist"></tbody></table></div>
+    </div>
+    <div id="mdetail"><div class="empty">Select a merchant on the left.</div></div>
+  </div>
+</section>
+
+<!-- PAYOUTS -->
+<section id="tab-payouts" hidden>
+  <h2>Payouts</h2>
+  <p class="lead">Every payout request and what happened at the bank. Select one to see its state and each attempt.</p>
+  <div class="chips" id="pchips"></div>
+  <div class="grid2">
+    <div class="panel" style="padding:4px 8px;max-height:680px;overflow-y:auto"><table>
+      <thead><tr><th>Payout</th><th class="num">Amount</th><th>Status</th><th class="num">Tries</th></tr></thead>
+      <tbody id="plist"></tbody></table></div>
+    <div id="pdetail"><div class="empty">Select a payout.</div></div>
+  </div>
+</section>
+
+<!-- LEARN -->
+<section id="tab-learn" hidden>
+  <h2>Follow one payout through the system</h2>
+  <p class="lead">Thirteen steps, from the card network to the bank. The stage doing the work lights up in the strip above.</p>
+  <div class="steps">
+    <ol class="steplist" id="steplist"></ol>
+    <div class="panel stepbody" id="stepbody"></div>
+  </div>
+</section>
+
+<!-- TEST -->
+<section id="tab-test" hidden>
+  <h2>Test it</h2>
+  <p class="lead">Live self-checks against the database, plus the commands to run the full test suite and the fault drills.</p>
+  <div class="grid2">
+    <div class="panel">
+      <div class="cmdrow"><h3 style="margin:0">Live invariants</h3><button class="btn" id="runchecks">Run checks</button></div>
+      <ul class="checks" id="checks"><li class="empty">Not run yet.</li></ul>
+    </div>
+    <div class="panel" id="cmds"></div>
+  </div>
+</section>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true" tabindex="-1">
+  <button class="btn ghost close" id="dclose">Close</button>
+  <div id="dbody"></div>
+</aside>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => (n ?? 0).toLocaleString('en-US');
+const money = (minor, cur) => (minor < 0 ? '−' : '') + (Math.abs(minor) / 100).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + (cur ? ' ' + cur : '');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ago = t => { if (!t) return '—'; const s = (Date.now() - new Date(t)) / 1000; return s < 60 ? Math.round(s) + ' s ago' : s < 3600 ? Math.round(s/60) + ' min ago' : Math.round(s/3600) + ' h ago'; };
+async function get(path){ const r = await fetch(path); if (!r.ok) throw new Error(path + ' → HTTP ' + r.status); return r.json(); }
+
+/* ---------------- stages: what each one is, in plain words ---------------- */
+const STAGES = [
+ {id:'gateway', name:'Gateway', who:'card acquirer', given:true,
+  what:'The card network\'s side. It streams every merchant\'s money events over one TCP connection, one numbered channel per merchant. It is deliberately unreliable: it drops, duplicates and reorders frames and disconnects every minute or two.',
+  risks:['Lost frames create gaps in a channel\'s numbering.','Duplicates arrive, sometimes marked poss_dup=false.','Only one connection per client is allowed: a new logon kicks the old one.'],
+  code:['harness/gateway.py (given, do not edit)','harness/PROTOCOL.md']},
+ {id:'reader', name:'Reader', who:'our code',
+  what:'Holds the single gateway connection (one leader out of two replicas). It repairs each channel: it accepts only the next number in order, drops duplicates, and asks for a resend when a number is missing. Every in-order frame is published to the broker; only when the broker confirms it is stored does the reader give the gateway credit to send more.',
+  risks:['Leader dies: the standby takes over in about 8 s (the lease in PostgreSQL expires).','Leader is paused: on waking it sees its lease deadline passed and stops before publishing anything.','A resend gets lost: re-asked after 2 s. A channel goes silent: probed after 4 s.'],
+  code:['settle/reader.py: Session._handle_bodies, on_ack, _timers, Lease','settle/bosp.py: FrameDecoder, ChannelSequencer, CreditLedger']},
+ {id:'broker', name:'Broker', who:'NATS JetStream',
+  what:'A durable queue between the reader and the consumers. There are 16 partitions (subjects); a merchant\'s events always go to the same one, so they keep their order. It stores messages on disk and confirms each publish.',
+  risks:['Restart: the reader\'s unconfirmed publishes time out, the session restarts and resumes from what the ledger applied.','Duplicates are allowed here on purpose: the ledger removes them exactly.'],
+  code:['settle/broker.py: ensure_stream','settle/partition.py: partition_of']},
+ {id:'consumers', name:'Consumers', who:'our code',
+  what:'Four or more processes share the 16 partitions; each partition has exactly one owner at a time. A consumer fetches a batch and applies it in one database transaction, together with the position it has read up to.',
+  risks:['Killed mid-batch: the transaction rolls back; whoever takes the partition re-reads the same messages.','A paused owner wakes after a takeover: its ownership check fails and it stops.','Scaling out: partitions are re-spread within a few seconds.'],
+  code:['settle/consumer.py: coordinate, run_partition, apply']},
+ {id:'ledger', name:'Ledger', who:'PostgreSQL',
+  what:'The source of truth. For each merchant it keeps the balances and last_seq, the last channel number applied. A frame is applied only if its number is exactly last_seq + 1, in the same transaction that changes the money. That one rule makes every redelivery harmless.',
+  risks:['Duplicate frame: number ≤ last_seq, nothing happens.','Frame from the future: dropped; the reader resumes from last_seq so it comes again.','Every event is journaled with the balance after it, which makes "balance at time T" one lookup.'],
+  code:['settle/ledger.py: apply_event (the money rules), apply_batch (the guard)','settle/schema.sql']},
+ {id:'payouts', name:'Payouts', who:'our code',
+  what:'Two or more executors pick up accepted payouts and send them to the bank exactly once. Before each attempt they write "sending" to the database. Any answer that might mean "paid" (502, timeout) makes the payout "unknown"; it is resolved by searching the bank, never by sending again blindly.',
+  risks:['Executor killed mid-call: its lease expires; the next executor searches the bank before doing anything.','Bank forgets idempotency keys after 120 s (20 s in the review run), so keys alone cannot prevent a double payment.','Closed account: marked failed, never retried.'],
+  code:['settle/payouts.py: claim, send, reconcile','settle/bankapi.py: classify_post','settle/limiter.py: shared token and limits (Redis)']},
+ {id:'bank', name:'Bank', who:'settlement bank', given:true,
+  what:'The partner bank. It executes payouts but behaves badly: it can fail after committing (502), hang for 25 s after committing, go into maintenance, rate limit at 20 per second, and forget idempotency keys.',
+  risks:['A double payment is a P1 incident: its own ledger is what the verifier checks.'],
+  code:['harness/bank.py (given, do not edit)','harness/BANK-API.md']},
+];
+
+function buildStrip(){
+  const t = $('#track');
+  for (const s of STAGES){
+    const b = document.createElement('button');
+    b.className = 'stage' + (s.given ? ' given' : ''); b.id = 'st-' + s.id; b.type = 'button';
+    b.innerHTML = `<div class="who"><span>${esc(s.who)}</span></div><div class="name">${esc(s.name)}</div><div class="big" id="big-${s.id}">—</div><div class="sub" id="sub-${s.id}">&nbsp;</div>`;
+    b.onclick = () => openStage(s.id);
+    t.appendChild(b);
+  }
+}
+function openStage(id){
+  const s = STAGES.find(x => x.id === id);
+  $('#dbody').innerHTML = `<h2>${esc(s.name)}</h2><p class="muted">${s.given ? 'Given by the assignment (harness).' : 'Part of our system.'}</p>
+    <p>${esc(s.what)}</p><h3>What goes wrong, and what happens then</h3><ul>${s.risks.map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+    <h3>Where to read the code</h3><ul>${s.code.map(c => `<li class="mono">${esc(c)}</li>`).join('')}</ul>
+    <p class="why">The full explanation is in docs/CODEBASE.md.</p>`;
+  const d = $('#drawer'); d.classList.add('open'); d.setAttribute('aria-hidden', 'false'); d.focus();
+}
+$('#dclose').onclick = () => { const d = $('#drawer'); d.classList.remove('open'); d.setAttribute('aria-hidden', 'true'); };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#dclose').click(); });
+
+/* ---------------- live strip ---------------- */
+let lastApplied = null;
+function setStage(id, big, sub, state){
+  $('#big-' + id).textContent = big; $('#sub-' + id).textContent = sub;
+  const el = $('#st-' + id); el.classList.toggle('warn', state === 'warn'); el.classList.toggle('bad', state === 'bad');
+}
+async function refreshSummary(){
+  try {
+    const s = await get('/v1/ui/summary');
+    $('#conn').innerHTML = '<span class="dot ok"></span>live · API reachable';
+    setStage('gateway', fmt(s.gateway.frames_received), `session ${s.gateway.session_epoch ?? '—'} · ${fmt(s.gateway.resends)} resends`);
+    setStage('reader', s.reader.lease_live ? 'leader up' : 'no leader', `${fmt(s.reader.published)} published · epoch ${s.reader.lease_epoch}`, s.reader.lease_live ? '' : 'bad');
+    setStage('broker', fmt(s.broker.lag), `waiting in ${s.broker.partitions} partitions`, s.broker.lag > 5000 ? 'warn' : '');
+    setStage('consumers', `${s.consumers.live} live`, `${s.consumers.owned_partitions}/${s.broker.partitions} partitions owned`, s.consumers.owned_partitions < s.broker.partitions ? 'warn' : '');
+    setStage('ledger', fmt(s.ledger.frames_applied), `frames applied · ${fmt(s.ledger.merchants)} merchants`);
+    const p = s.payouts, amb = (p.unknown || 0) + (p.sending || 0);
+    setStage('payouts', fmt(p.paid || 0) + ' paid', `${fmt(p.pending || 0)} pending · ${fmt(amb)} unclear`, amb > 0 ? 'warn' : '');
+    const posts = s.bank.posts, total = Object.values(posts).reduce((a, b) => a + b, 0);
+    setStage('bank', fmt(total), `calls · ${fmt((posts.bad_gateway || 0) + (posts.timeout || 0))} unclear answers`);
+    if (lastApplied !== null && s.ledger.frames_applied > lastApplied){
+      const k = $('#packet'); k.classList.remove('go'); void k.offsetWidth; k.classList.add('go');
+    }
+    lastApplied = s.ledger.frames_applied;
+  } catch (e){
+    $('#conn').innerHTML = '<span class="dot bad"></span>cannot reach the API: is the stack running?';
+  }
+}
+
+/* ---------------- overview ---------------- */
+const PSTATES = [['paid','var(--note)'],['pending','var(--muted)'],['sending','#8FA0B8'],['unknown','var(--amber)'],['failed','var(--red)'],['rejected','#D9A19A']];
+async function refreshOverview(){
+  let o; try { o = await get('/v1/ops/status'); } catch { return; }
+  $('#parts').innerHTML = o.broker_partitions.map(p => {
+    const cls = !p.owner || !p.lease_live ? 'orphan' : p.lag > 1000 ? 'lag' : p.lag === 0 ? 'idle' : '';
+    return `<div class="part ${cls}" title="owner ${esc(p.owner || 'none')}, epoch ${p.owner_epoch}"><b>p${p.partition}</b><br>
+      lag ${fmt(p.lag)}<br><span class="muted mono">${esc((p.owner || 'no owner').split(':')[0].slice(0, 12))}</span></div>`;
+  }).join('');
+  const b = o.channels_behind;
+  $('#behind').innerHTML = b.length ? `<table><thead><tr><th>Channel</th><th class="num">Applied</th><th class="num">Received</th><th class="num">Highest seen</th></tr></thead><tbody>
+    ${b.slice(0, 12).map(c => `<tr><td class="mono">${esc(c.channel)}</td><td class="num">${fmt(c.applied)}</td><td class="num">${fmt(c.received)}</td><td class="num">${fmt(c.highest_seen)}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty">Every channel is caught up.</div>';
+  const ps = o.payouts_by_state, tot = Object.values(ps).reduce((a, x) => a + x, 0) || 1;
+  $('#pbar').innerHTML = PSTATES.map(([k, c]) => ps[k] ? `<span style="width:${100 * ps[k] / tot}%;background:${c}" title="${k}: ${ps[k]}"></span>` : '').join('');
+  $('#plegend').innerHTML = PSTATES.map(([k, c]) => `<span><i style="background:${c}"></i>${k} ${fmt(ps[k] || 0)}</span>`).join('');
+  const posts = o.bank_outcomes.filter(x => x.kind === 'post'), srch = o.bank_outcomes.filter(x => x.kind === 'search');
+  const row = x => `<tr><td>${esc(x.outcome.replaceAll('_', ' '))}</td><td class="num">${fmt(x.count)}</td></tr>`;
+  $('#bank').innerHTML = posts.length || srch.length ? `<table><thead><tr><th>Payout calls</th><th class="num">Count</th></tr></thead><tbody>${posts.map(row).join('')}</tbody></table>
+    ${srch.length ? `<table style="margin-top:10px"><thead><tr><th>Searches (resolving unclear answers)</th><th class="num">Count</th></tr></thead><tbody>${srch.map(row).join('')}</tbody></table>` : ''}`
+    : '<div class="empty">No bank calls yet.</div>';
+  const s = o.session;
+  $('#session').innerHTML = `<dt>Leader</dt><dd class="mono">${esc(s.holder || 'none')}</dd><dt>Lease epoch</dt><dd>${s.lease_epoch}</dd>
+    <dt>Gateway session</dt><dd>${s.gateway_session_epoch ?? '—'}</dd><dt>Leader since</dt><dd>${ago(s.since)}</dd>
+    <dt>Live consumers</dt><dd>${o.consumers.filter(c => c.live).length}</dd>`;
+}
+
+/* ---------------- merchants ---------------- */
+const RULES = {
+  'rejected:auth_not_open': 'The auth it refers to is not open (already captured, expired, or never existed). No effect.',
+  'rejected:capture_exceeds_auth': 'Capture is larger than the authorised amount. No effect.',
+  'rejected:capture_not_found': 'Refers to a capture that does not exist for this merchant. No effect.',
+  'rejected:refund_exceeds_capture': 'Total refunds would exceed the captured amount. No effect.',
+  'rejected:insufficient_funds': 'Available (settled − reserve) did not cover the payout at this point in the sequence. No effect.',
+  'ignored': 'Unknown event type: ignored for forward compatibility, but it still used up its sequence number.',
+  'applied': 'Applied.'};
+let curMerchant = null;
+async function loadMerchants(){
+  const list = await get(`/v1/ui/merchants?q=${encodeURIComponent($('#mq').value)}&order=${$('#morder').value}&limit=200`);
+  $('#mlist').innerHTML = list.length ? list.map(m => `<tr class="click ${m.merchant_id === curMerchant ? 'sel' : ''}" data-id="${esc(m.merchant_id)}" tabindex="0">
+     <td class="mono">${esc(m.merchant_id)}</td><td class="num">${money(m.available, m.currency)}</td><td class="num muted">#${fmt(m.last_seq)}</td></tr>`).join('')
+    : '<tr><td class="empty">No merchants yet: the ledger fills as soon as events are applied.</td></tr>';
+  document.querySelectorAll('#mlist tr.click').forEach(tr => { tr.onclick = tr.onkeydown = e => { if (!e.key || e.key === 'Enter') showMerchant(tr.dataset.id); }; });
+}
+async function showMerchant(id){
+  curMerchant = id;
+  document.querySelectorAll('#mlist tr').forEach(tr => tr.classList.toggle('sel', tr.dataset.id === id));
+  const [b, ents] = await Promise.all([get(`/v1/merchants/${id}/balance`), get(`/v1/ui/merchants/${id}/entries?limit=100`)]);
+  const cur = b.currency || '';
+  $('#mdetail').innerHTML = `<div class="panel"><div class="cmdrow"><h3 style="margin:0" class="mono">${esc(id)}</h3><span class="muted">channel position #${fmt(b.last_seq)}</span></div>
+    <div class="money"><div><span class="muted">Settled</span><b>${money(b.settled_minor, cur)}</b></div><div><span class="muted">On hold</span><b>${money(b.held_minor, cur)}</b></div><div><span class="muted">Available</span><b>${money(b.available_minor, cur)}</b></div></div>
+    <h3>Balance at a moment in time</h3>
+    <p class="why">Pick a moment, or click a row's time below. The answer is the balance after the last event at or before it.</p>
+    <div class="row"><input type="datetime-local" step="0.001" id="asof" style="max-width:260px" aria-label="Moment (UTC)"><span class="muted">UTC</span><button class="btn" id="asofgo">Show balance</button></div>
+    <div id="asofout" class="why" style="margin-top:8px"></div>
+    <h3>Journal, newest first</h3>
+    <div style="max-height:460px;overflow-y:auto"><table><thead><tr><th class="num">#</th><th>Event</th><th>Time (UTC)</th><th>Result</th><th class="num">Amount</th><th class="num">Settled after</th><th class="num">Held after</th></tr></thead><tbody>
+    ${ents.map(e => { const r = e.result.split(':')[0]; return `<tr><td class="num muted">${e.seq}</td><td>${esc(e.type)}</td>
+      <td><a href="#" class="mono pick" data-t="${esc(e.event_time)}">${esc(String(e.event_time).replace('T', ' ').slice(0, 23))}</a></td>
+      <td><span class="pill r-${r}" title="${esc(RULES[e.result] || e.result)}">${esc(e.result.replace('rejected:', 'rejected · ').replaceAll('_', ' '))}</span></td>
+      <td class="num">${e.amount == null ? '—' : money(e.amount)}</td><td class="num">${money(e.settled_after)}</td><td class="num">${money(e.held_after)}</td></tr>`; }).join('')}
+    </tbody></table></div><p class="why">Hover a result to see which rule decided it. Rows are only DATA events; NOTICEs use a sequence number but change nothing.</p></div>`;
+  $('#asofgo').onclick = async () => {
+    const v = $('#asof').value; if (!v) { $('#asofout').innerHTML = '<span class="err">Pick a moment first.</span>'; return; }
+    const iso = new Date(v + 'Z').toISOString();
+    const r = await get(`/v1/merchants/${id}/balance?as_of=${encodeURIComponent(iso)}`);
+    $('#asofout').innerHTML = `At <span class="mono">${esc(iso)}</span>: settled <b>${money(r.settled_minor, cur)}</b>, on hold <b>${money(r.held_minor, cur)}</b>, available <b>${money(r.available_minor, cur)}</b>.`;
+  };
+  document.querySelectorAll('.pick').forEach(a => a.onclick = e => { e.preventDefault(); $('#asof').value = new Date(a.dataset.t).toISOString().slice(0, 23); $('#asofgo').click(); });
+}
+let mt; $('#mq').oninput = () => { clearTimeout(mt); mt = setTimeout(loadMerchants, 250); }; $('#morder').onchange = loadMerchants;
+
+/* ---------------- payouts ---------------- */
+const PFILTERS = ['', 'pending', 'sending', 'unknown', 'paid', 'failed', 'rejected'];
+let pstatus = '', curPayout = null;
+$('#pchips').innerHTML = PFILTERS.map(s => `<button aria-pressed="${s === ''}" data-s="${s}">${s || 'all'}</button>`).join('');
+document.querySelectorAll('#pchips button').forEach(b => b.onclick = () => { pstatus = b.dataset.s; document.querySelectorAll('#pchips button').forEach(x => x.setAttribute('aria-pressed', x === b)); loadPayouts(); });
+async function loadPayouts(){
+  const list = await get(`/v1/ui/payouts?status=${pstatus}&limit=300`);
+  $('#plist').innerHTML = list.length ? list.map(p => `<tr class="click ${p.payout_id === curPayout ? 'sel' : ''}" data-id="${esc(p.payout_id)}" tabindex="0">
+    <td class="mono">${esc(p.payout_id)}</td><td class="num">${money(p.amount, p.currency)}</td><td><span class="pill s-${p.status}">${p.status}</span></td><td class="num">${p.attempts}</td></tr>`).join('')
+    : '<tr><td class="empty">No payouts in this state.</td></tr>';
+  document.querySelectorAll('#plist tr.click').forEach(tr => { tr.onclick = tr.onkeydown = e => { if (!e.key || e.key === 'Enter') showPayout(tr.dataset.id); }; });
+}
+const OUT = {executed:['good','Bank executed it (201)'], replayed:['good','Bank replayed the stored answer: the same execution'], account_closed:['bad','Account closed: failed for good, never retried'],
+  bad_gateway:['amb','502 after the bank committed: it probably paid'], timeout:['amb','No answer in time: it may have paid'], request_in_progress:['amb','The same key is still processing'],
+  rate_limited:['no','Rate limited: nothing paid, retry later'], maintenance:['no','Bank in maintenance: nothing paid, retry later'], upstream_unavailable:['no','Failed before commit: nothing paid'],
+  too_many_inflight:['no','Two payouts already in flight to this account: retry later'], invalid_token:['no','Token rejected: refresh it and retry'], connect_error:['no','Could not connect: nothing was sent'],
+  found_1:['good','Search found exactly one execution: paid'], found_0:['no','Search found nothing: not paid, send again with a new key'], found_2:['bad','Search found more than one execution: double payment']};
+async function showPayout(id){
+  curPayout = id;
+  document.querySelectorAll('#plist tr').forEach(tr => tr.classList.toggle('sel', tr.dataset.id === id));
+  const p = await get(`/v1/ui/payouts/${encodeURIComponent(id)}`);
+  const SEARCH_NOT_NOW = {maintenance:'Bank in maintenance: search not possible yet, will try again', rate_limited:'Search rate limited: will try again',
+    transport_error:'Search did not get an answer: will try again', invalid_token:'Token rejected: refresh it and search again'};
+  const states = ['pending', 'sending', 'unknown', 'paid', 'failed', 'rejected'];
+  $('#pdetail').innerHTML = `<div class="panel"><h3 style="margin-top:0" class="mono">${esc(p.payout_id)}</h3>
+    <div class="sm" aria-label="State machine">${states.map(s => `<span class="${s === p.status ? 'on' : ''}">${s}</span>`).join('')}</div>
+    <dl class="kv"><dt>Merchant</dt><dd class="mono">${esc(p.merchant_id)}</dd><dt>Amount</dt><dd>${money(p.amount, p.currency)}</dd>
+    <dt>To account</dt><dd class="mono">${esc(p.account)}</dd><dt>Bank payout id</dt><dd class="mono">${esc(p.bank_payout_id || '—')}</dd>
+    <dt>Reason</dt><dd>${esc(p.reason || '—')}</dd><dt>Idempotency key now</dt><dd class="mono">${esc(p.payout_id)}#${p.key_gen}</dd></dl>
+    <h3>What happened, oldest first</h3>
+    ${p.history.length ? `<ol class="timeline">${p.history.map(h => { const o = (h.kind === 'search' && SEARCH_NOT_NOW[h.outcome]) ? ['no', SEARCH_NOT_NOW[h.outcome]] : (OUT[h.outcome] || ['no', h.outcome]); return `<li class="${o[0]}">
+      <b>${h.kind === 'post' ? 'Payout call' : 'Search by reference'}</b>${h.idem_key ? ` <span class="mono muted">${esc(h.idem_key)}</span>` : ''}<br>${esc(o[1])}
+      <div class="muted" style="font-size:12px">${esc(String(h.at).replace('T', ' ').slice(0, 19))} · ${esc(h.executor)}</div></li>`; }).join('')}</ol>`
+      : `<div class="empty">${p.status === 'rejected' ? 'Rejected by the ledger (insufficient funds): it never goes to the bank.' : 'No bank call yet.'}</div>`}
+    <p class="why">Rule: an unclear answer is resolved only by searching the bank, at least 18 s after the attempt started, so that any payment it made is visible. Only a search that finds nothing allows a new attempt, and that attempt uses a new key.</p></div>`;
+}
+
+/* ---------------- learn ---------------- */
+const STEPS = [
+ ['gateway','A guest pays; the card network tells us','Merchant M-0042 asks for a payout. The gateway sends it as frame number 1187 on channel M-0042: {"type":"DATA","channel":"M-0042","seq":1187,"event":{"type":"PAYOUT_REQUEST","amount_minor":125000}}.','harness/gateway.py'],
+ ['reader','The reader cuts the TCP stream into frames','TCP has no message boundaries: a read can hold half a frame or three frames. FrameDecoder keeps the bytes until a whole frame (4-byte length + JSON) is there.','settle/bosp.py · FrameDecoder.feed'],
+ ['reader','Is this the next number?','The channel\'s sequencer expected 1187, so the frame is accepted. Had 1186 been lost, this frame would be dropped and a RESEND from 1186 sent; both come again.','settle/bosp.py · ChannelSequencer.on_frame'],
+ ['reader','Am I still the leader?','Before every publish the reader checks its lease deadline (no network call). A reader that was paused past its lease stops right here.','settle/reader.py · Lease.valid'],
+ ['broker','Publish, then wait for the broker\'s receipt','The raw frame goes to partition crc32("M-0042") % 16. NATS stores it on disk and confirms. Only then does the reader give the gateway one credit back, so the gateway can never run ahead of what is safely stored.','settle/reader.py · Session.on_ack'],
+ ['consumers','The partition\'s owner fetches a batch','Exactly one consumer owns that partition. It fetches up to 1000 messages starting right after the position saved in the database.','settle/consumer.py · run_partition'],
+ ['consumers','Ownership check','First statement of the transaction: lock our partition row, but only if we still own it with the same epoch. If someone took over, nothing is returned and we stop.','settle/consumer.py · apply'],
+ ['ledger','The sequence guard','Lock the merchant row: last_seq is 1186, the frame is 1187, so it is applied. A duplicate (≤ 1186) would do nothing; a frame from the future would be dropped.','settle/ledger.py · apply_batch'],
+ ['ledger','The money rule','Available = settled − reserve covers 1,250.00, so settled goes down and a payout row is created as "pending", with the bank account captured now.','settle/ledger.py · apply_event'],
+ ['ledger','One commit for everything','Journal row (with the balance after), payout row, merchant balances and last_seq = 1187, and the partition\'s read position: all in one transaction. Either all of it happened or none of it did.','settle/ledger.py · apply_batch step 4'],
+ ['payouts','An executor claims it and writes "sending" first','The executor leases the payout for 60 s, then commits status "sending" with the attempt time before calling the bank. If it dies mid-call, the next executor knows a call may have happened.','settle/payouts.py · claim, send'],
+ ['bank','The call that moves money','POST /v1/payouts with Idempotency-Key M-0042:1187#0. 201 means paid. 503 maintenance means nothing happened: try later. 502 or a timeout means it may have paid: the payout becomes "unknown".','settle/bankapi.py · classify_post'],
+ ['payouts','Resolving "unknown"','After 18 s (timeout + commit grace + search lag), search the bank by reference. One result: paid. None: send again with key #1. More than one: a double payment, raised as an alert.','settle/payouts.py · reconcile'],
+];
+let step = 0;
+function renderLearn(){
+  $('#steplist').innerHTML = STEPS.map((s, i) => `<li tabindex="0" data-i="${i}" aria-current="${i === step}">${esc(s[1])}</li>`).join('');
+  document.querySelectorAll('#steplist li').forEach(li => li.onclick = li.onkeydown = e => { if (!e.key || e.key === 'Enter') { step = +li.dataset.i; renderLearn(); } });
+  const s = STEPS[step];
+  $('#stepbody').innerHTML = `<h3 style="margin-top:0">${step + 1}. ${esc(s[1])}</h3><p>${esc(s[2])}</p><div class="code mono">${esc(s[3])}</div>
+    <div class="row" style="margin-top:14px"><button class="btn ghost" id="prev" ${step === 0 ? 'disabled' : ''}>Previous</button><button class="btn" id="next" ${step === STEPS.length - 1 ? 'disabled' : ''}>Next step</button>
+    <button class="btn ghost" id="stagemore">About this stage</button></div>`;
+  $('#prev').onclick = () => { step--; renderLearn(); }; $('#next').onclick = () => { step++; renderLearn(); }; $('#stagemore').onclick = () => openStage(s[0]);
+  lightStage(s[0]);
+}
+function lightStage(id){ document.querySelectorAll('.stage').forEach(el => el.classList.toggle('lit', el.id === 'st-' + id)); }
+
+/* ---------------- test ---------------- */
+const CMDS = [
+ ['Run the test suite','46 tests plus 7 reproducers of the old team\'s bugs (shown as xfail: the bug is reproduced).','docker compose --profile test run --rm tests'],
+ ['Check everything against ground truth','After the gateway finishes. Must end with RESULT: PASS.','docker compose run --rm verify'],
+ ['Inject the reviewers\' faults','Kills and pauses the leader, kills and adds consumers, restarts NATS, Redis and PostgreSQL, kills a payout executor. Watch the strip while it runs.','python scripts/faults.py all'],
+ ['One fault at a time','For example the leader pause. Other names: kill-leader, kill-consumer, scale-consumers, restart-broker, restart-redis, restart-postgres, kill-payouts.','python scripts/faults.py pause-leader'],
+ ['Start clean','The gateway\'s clock starts with it, so reset everything together.','docker compose down -v; docker compose up --build -d'],
+];
+$('#cmds').innerHTML = '<h3 style="margin-top:0">Commands</h3>' + CMDS.map(([t, d, c]) => `<div style="margin-bottom:12px"><div class="cmdrow"><b>${esc(t)}</b><button class="btn ghost copy" data-c="${esc(c)}">Copy</button></div>
+  <div class="why">${esc(d)}</div><pre class="cmd">${esc(c)}</pre></div>`).join('') +
+  `<h3>Raw views</h3><p class="why"><a href="/v1/ops/status">/v1/ops/status</a> · <a href="/metrics">/metrics</a> · <a href="/docs">API reference</a> · <a href="/readyz">/readyz</a></p>`;
+document.querySelectorAll('.copy').forEach(b => b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.c); b.textContent = 'Copied'; } catch { b.textContent = 'Select and copy'; } setTimeout(() => b.textContent = 'Copy', 1500); });
+$('#runchecks').onclick = async () => {
+  $('#checks').innerHTML = '<li class="empty">Running…</li>';
+  try {
+    const cs = await get('/v1/ui/checks');
+    $('#checks').innerHTML = cs.map(c => `<li><span class="mark ${c.ok ? 'ok' : 'no'}">${c.ok ? '✓' : '✗'}</span><div><b>${esc(c.name)}</b><div class="why">${esc(c.detail)} · look at ${esc(c.where)}</div></div></li>`).join('');
+  } catch (e) { $('#checks').innerHTML = `<li class="err">${esc(e.message)}</li>`; }
+};
+
+/* ---------------- tabs + polling ---------------- */
+let tab = 'overview';
+document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
+  document.querySelectorAll('main > section').forEach(s => s.hidden = s.id !== 'tab-' + tab);
+  if (tab !== 'learn') lightStage(null);
+  if (tab === 'overview') refreshOverview();
+  if (tab === 'merchants') loadMerchants();
+  if (tab === 'payouts') loadPayouts();
+  if (tab === 'learn') renderLearn();
+});
+buildStrip(); refreshSummary(); refreshOverview();
+setInterval(refreshSummary, 2000);
+setInterval(() => { if (tab === 'overview') refreshOverview(); if (tab === 'payouts' && !curPayout) loadPayouts(); }, 3000);
+</script>
+</body>
+</html>

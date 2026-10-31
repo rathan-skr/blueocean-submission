@@ -8,7 +8,7 @@ A payments settlement pipeline in Python 3.12: BOSP gateway → `settle.reader` 
 ## Commands
 ```bash
 docker compose up --build -d                          # run everything (harness included)
-docker compose --profile test run --rm tests          # tests: expect "45 passed, 7 xfailed"
+docker compose --profile test run --rm tests          # tests: expect "46 passed, 7 xfailed"
 docker compose run --rm verify                        # end-to-end check after the gateway finishes: expect RESULT: PASS
 python scripts/faults.py all                          # fault injection (host)
 docker compose logs -f reader consumer payouts        # JSON logs
@@ -25,6 +25,7 @@ docker compose logs -f reader consumer payouts        # JSON logs
 - `settle/bankapi.py`: bank HTTP client and `classify_post` (the outcome matrix).
 - `settle/limiter.py`: Redis-shared rate limit, per-account slots, OAuth token (all fail open).
 - `settle/api.py`: HTTP API, `/v1/ops/status`, `/metrics`.
+- `settle/ui.py` + `settle/ui/index.html`: the settlement console at `/ui` (read-only). Keep its `STAGES`/`STEPS` text in sync with behaviour.
 - `settle/partition.py`, `broker.py`, `db.py`, `log.py`: small helpers.
 - `tests/`: tests. `tests/incumbent/`: Part C reproducers.
 - `harness/`, `incumbent/`: **given by the assignment, read-only.**

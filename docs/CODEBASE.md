@@ -104,6 +104,10 @@ See section 4.
 | `GET /healthz`, `/readyz` | Process is up / PostgreSQL reachable. |
 | `GET /v1/ops/status` | Operator view: leader, epochs, channels behind, partitions and lag, consumers, payouts by state, bank outcomes. |
 | `GET /metrics` | The same in Prometheus format. |
+| `GET /ui` | The settlement console (see `ui.py` below). |
+
+### `settle/ui.py` and `settle/ui/index.html`: the settlement console
+`/ui` serves one self-contained HTML page (vanilla JS, no build step). Its read-only JSON comes from `/v1/ui/summary` (the strip), `/v1/ui/merchants` (+ `/{id}/entries`), `/v1/ui/payouts` (+ `/{id}` with attempt history), and `/v1/ui/checks` (live invariants). Nothing in the pipeline uses these. Stage explanations and the 13 learning steps are plain data at the top of the page's script (`STAGES`, `STEPS`): update them when behaviour changes.
 
 ### `settle/bankapi.py`: the bank client
 | Name | What it does |

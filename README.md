@@ -34,9 +34,22 @@ python harness/verify.py check
 **Tests.** These use real PostgreSQL and Redis from the stack, and the real `harness/bank.py`.
 
 ```bash
-docker compose --profile test run --rm tests                 # all: 45 passed, 7 xfailed
+docker compose --profile test run --rm tests                 # all: 46 passed, 7 xfailed
 docker compose --profile test run --rm tests -k incumbent    # Part C reproducers only
 ```
+
+## The settlement console: http://localhost:8080/ui
+
+A browser view of the running system, for understanding it and for testing it. It needs no setup and is read-only.
+
+- **Live pipeline strip.** All seven stages from gateway to bank, with live numbers. Click a stage for a plain-language explanation of what it does, what can go wrong, and which file and function to read.
+- **Overview.** Partition ownership and lag, channels behind, payouts by state, bank response classes, and who holds the session.
+- **Merchants.** Any merchant's balance now or **at any past moment**, plus its journal: every event, the verdict of the rule that decided it, and the balance after it.
+- **Payouts.** A filter by state. For each payout, its state and **every exchange with the bank**: an unclear answer followed by the search that resolved it.
+- **Learn the flow.** 13 steps following one payout through the code, with the active stage lit up in the strip.
+- **Test.** Live invariant checks against the database, plus the commands for tests, verify and fault drills.
+
+![Payout history in the console](docs/console-payouts.png)
 
 ## Services and how to scale them
 
