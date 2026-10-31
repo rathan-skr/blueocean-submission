@@ -88,6 +88,25 @@ The DESIGN.md sections that cover each mechanism:
 - It has pull consumers that start at any stream sequence. That lets the **offset live in PostgreSQL, in the same transaction as the effects**, so we need none of the broker's consumer-group or ack machinery.
 - Kafka would also work but is heavier to run here. Redis Streams was out, because Redis must not be a durability dependency.
 
+## Results
+
+Measured on a 2-core Linux sandbox with native PostgreSQL 16, NATS 2.10 and Redis 7, and the harness unmodified:
+
+| Run | Chaos | Faults | Result |
+|---|---|---|---|
+| 60 k frames | Default gateway. Bank TTL 20 s, 10 % after-commit failures, maintenance 30 s every 90 s. | None | **PASS** |
+| 500 k frames, 3 k/s | 5× drops, disconnects every 20–40 s, plus the bank settings above | All §5.4 items, 1–7 | **PASS** |
+| **2 M frames, 3 k/s** | Same | All §5.4 items, 1–7 | **PASS** (detail below) |
+
+**Detail of the 2 M-frame run:**
+
+- **Payouts:** 7,017, of which 3,881 were paid, 88 failed (closed accounts) and 3,048 were rejected.
+- **What the bank threw at us:** 406 failures after commit, 64 hangs after commit, and 718 maintenance 503s.
+- **Double payments: 0.** The bank ledger shows exactly one execution per paid payout.
+- **Catch-up:** the last frame was applied before the gateway reported finished.
+- **`as_of` latency:** p99 4.2 ms.
+- **Reader failover:** 7.3 s after `kill -9`, and about 9 s after `SIGSTOP`. The paused leader stood down within 1 s of `SIGCONT` (`LeaseLost: local lease deadline passed`).
+
 ## Built vs deferred
 
 **Built.** Every Part A requirement (A1–A7):
