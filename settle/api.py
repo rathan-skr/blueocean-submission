@@ -44,6 +44,7 @@ async def q(sql: str, args=(), one=False):
 # -- contract -----------------------------------------------------------------------------------
 @app.get("/v1/merchants/{merchant_id}/balance")
 async def balance(merchant_id: str, as_of: str | None = Query(default=None)):
+    """Current balance, or the balance after the last event with event_time <= as_of (one index probe)."""
     if as_of is None:
         r = await q("SELECT currency, settled, held, reserve, last_seq FROM merchants WHERE merchant_id = %s",
                     (merchant_id,), one=True)
@@ -105,6 +106,8 @@ async def _redis_json(key):
 
 @app.get("/v1/ops/status")
 async def ops_status(behind_limit: int = 20):
+    """Operator view: session holder/epochs, channels behind, broker lag per partition, consumers,
+    payouts by state (incl. ambiguous), bank response classes."""
     lease = await q("SELECT holder, epoch, since, expires_at, session_epoch, expires_at > now() FROM reader_lease "
                     "WHERE name = 'bosp'", one=True)
     reader = await _redis_json("reader:status")

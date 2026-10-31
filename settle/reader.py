@@ -132,6 +132,7 @@ class Session:
 
     # -- outbound ----------------------------------------------------------------------------
     def send(self, obj: dict):
+        """Write one frame to the gateway (buffered; drained by the timer loop)."""
         self.writer.write(bosp.encode(obj))
         self.last_sent = time.monotonic()
 
@@ -141,6 +142,8 @@ class Session:
 
     # -- broker acks -------------------------------------------------------------------------
     async def on_ack(self, msg):
+        """NATS PubAck for one publish. Only now is the frame durable, so only now is its credit returned
+        to the gateway (rule R4). An error ack marks the session failed; the recv loop then ends it."""
         try:
             n = int(msg.subject.rsplit(".", 1)[1])
         except ValueError:
@@ -164,6 +167,8 @@ class Session:
 
     # -- the session -------------------------------------------------------------------------
     async def run(self, resume: dict[str, int]):
+        """One gateway session: LOGON with `resume` (applied last_seq per channel), grant credit, then
+        run the receive loop and the timers until anything ends the session (raises)."""
         reader, self.writer = await asyncio.wait_for(
             asyncio.open_connection(config.GATEWAY_HOST, config.GATEWAY_PORT, limit=1 << 20), 5)
         sub = await self.nc.subscribe(self.inbox + ".*", cb=self.on_ack)
@@ -239,6 +244,9 @@ class Session:
             await self._handle_bodies(dec.feed(chunk))
 
     async def _handle_bodies(self, bodies):
+        """Process decoded frames in arrival order. Sequenced frames go through the channel's
+        ChannelSequencer: ACCEPT -> publish to NATS (after the lease check, rule R5); DUP / GAP ->
+        credit back immediately (+ RESEND on a gap). Control frames are answered inline."""
         m = self.metrics
         for raw in bodies:
             f = json.loads(raw)
@@ -277,6 +285,8 @@ class Session:
                 log.warning("unknown frame type ignored", extra={"type": t})
 
     async def _timers(self):
+        """Every 0.2 s: dead-server detection, lease deadline, PubAck timeout, sequencer RESENDs
+        (lost resend / tail probe) and our own heartbeat. Ends the session by closing the socket."""
         m = self.metrics
         try:
             while True:
@@ -345,6 +355,8 @@ async def publish_metrics(r, metrics, session_ref, lease):
 
 
 async def main():
+    """Leader loop: hold the lease (or wait for it), run sessions back to back, stand down on
+    'superseded' or a lost lease, release the lease on SIGTERM so a standby takes over at once."""
     setup_logging("reader")
     await asyncio.to_thread(db.bootstrap)
     nc, js = await broker.connect("reader")

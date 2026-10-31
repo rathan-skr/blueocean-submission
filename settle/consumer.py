@@ -52,6 +52,9 @@ class Consumer:
 
     # -- membership + assignment (one small autocommit connection) --------------------------
     async def coordinate(self):
+        """Membership + partition assignment, every second. Live members sorted -> partition p belongs
+        to members[p % n]. Renews leases we keep, flags partitions to release, and acquires free or
+        expired ones (owner_epoch + 1 = the fencing token for the apply transaction)."""
         conn = None
         while not self.stop.is_set():
             try:
@@ -111,6 +114,8 @@ class Consumer:
 
     # -- one partition ------------------------------------------------------------------------
     async def run_partition(self, o: Owned):
+        """Fetch -> apply loop for one owned partition. Reads NATS from our committed offset + 1 with
+        an ephemeral, ack-none consumer; any error resets the subscription to the committed offset."""
         conn = None
         sub = None
         try:
@@ -208,6 +213,7 @@ class Consumer:
         return True
 
     async def release(self, o: Owned):
+        """Give a partition back (fenced on owner + epoch) so its new owner can take it immediately."""
         try:
             conn = await db.aconnect(app="consumer-release")
             await conn.execute("UPDATE partitions SET owner = NULL, lease_until = now() WHERE partition = %s "

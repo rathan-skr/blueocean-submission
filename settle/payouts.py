@@ -66,6 +66,8 @@ class Executor:
             return cur
 
     async def claim(self, n: int) -> list[tuple]:
+        """Lease up to n due payouts to this executor (SKIP LOCKED: executors never wait on each other).
+        Returns (id, status, account, currency, amount, key_gen, seconds since attempt start, attempts)."""
         cur = await self.x(
             "UPDATE payouts p SET lease_owner = %s, lease_until = now() + make_interval(secs => %s) "
             "FROM (SELECT payout_id FROM payouts WHERE status IN ('pending', 'sending', 'unknown') "
@@ -78,6 +80,7 @@ class Executor:
         return await cur.fetchall()
 
     async def release(self, pid: str, status: str, delay: float, **cols):
+        """Set a payout's next status and give up the lease. Fenced on lease_owner (rule R10)."""
         sets = ", ".join(f"{k} = %({k})s" for k in cols)
         await self.x(
             f"UPDATE payouts SET status = %(status)s, next_attempt_at = now() + make_interval(secs => %(delay)s), "
@@ -126,6 +129,8 @@ class Executor:
                 await asyncio.sleep(1)
 
     async def work(self, row, claimed_at: float):
+        """Drive one claimed payout one step: reconcile first if a previous attempt may have executed,
+        then send. `deadline` keeps every POST well inside our lease."""
         pid, status, account, currency, amount, key_gen, since_attempt, attempts = row
         p = {"payout_id": pid, "account": account, "currency": currency.strip() if currency else currency,
              "amount": amount, "key_gen": key_gen, "attempts": attempts}
@@ -149,6 +154,8 @@ class Executor:
 
     # -- POST ------------------------------------------------------------------------------------
     async def send(self, p: dict, deadline: float):
+        """One POST attempt: account slot -> rate slot -> token -> write-ahead `sending` (committed)
+        -> POST -> classify -> next status. The write-ahead must stay BEFORE the POST (rule R8)."""
         pid, account = p["payout_id"], p["account"]
         slot = await self.slots.try_acquire(account)
         if slot is None:                              # account busy across the fleet

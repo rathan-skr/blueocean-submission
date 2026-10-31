@@ -8,6 +8,8 @@
 
 The documents: `DESIGN.md` (Part B), `REVIEW.md` (Part C), `AI-USAGE.md`.
 
+**Developer docs:** start with [`docs/CODEBASE.md`](docs/CODEBASE.md) (architecture, code map, one event end to end, data model, the rules you must not break, every setting). Then read [`docs/HOW-TO.md`](docs/HOW-TO.md) (change recipes: new event type, daily payout limit, `CHANNEL_RESET`, partitions, metrics, debugging) and [`docs/TESTING.md`](docs/TESTING.md). AI assistants: [`AGENTS.md`](AGENTS.md).
+
 ## Run it
 
 You need Docker with Compose v2.20 or newer (for `include:`). The host only needs Python 3.11+ to run `verify.py`.
