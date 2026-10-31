@@ -60,6 +60,7 @@ class Consumer:
             try:
                 if conn is None or conn.closed:
                     conn = await db.aconnect(app="consumer-coord")
+                # 1. Heartbeat: we are alive. Members that stop heartbeating for MEMBER_TTL_S drop out of the list.
                 await conn.execute("INSERT INTO consumer_members (member_id, heartbeat) VALUES (%s, now()) "
                                    "ON CONFLICT (member_id) DO UPDATE SET heartbeat = now()", (self.me,))
                 cur = await conn.execute(
@@ -68,6 +69,8 @@ class Consumer:
                 members = [r[0] for r in await cur.fetchall()]
                 if self.me not in members:
                     members = sorted(members + [self.me])
+                # 2. Deterministic assignment: every live consumer computes the same answer from the same sorted
+                #    list, so no coordinator is needed. Adding/removing a consumer reshuffles partitions (rebalance).
                 target = {p for p in range(config.PARTITIONS) if members[p % len(members)] == self.me}
                 # give up partitions that now belong to someone else (after the in-flight batch)
                 for p, o in list(self.owned.items()):
@@ -78,6 +81,7 @@ class Consumer:
                     o = self.owned.get(p)
                     if o and not o.release:
                         cur = await conn.execute(
+                            # 3a. Renew a partition we keep - only if owner AND epoch still match (someone may have taken it).
                             "UPDATE partitions SET lease_until = now() + make_interval(secs => %s) "
                             "WHERE partition = %s AND owner = %s AND owner_epoch = %s",
                             (config.PARTITION_LEASE_S, p, self.me, o.epoch))
@@ -87,6 +91,9 @@ class Consumer:
                         continue
                     if o is None:
                         cur = await conn.execute(
+                            # 3b. Take a partition that is ours by assignment, but only once it is free or its lease expired
+                            #     (a killed consumer's partition becomes takeable after PARTITION_LEASE_S). owner_epoch + 1 makes
+                            #     any transaction still running under the old owner fail its fence check. stream_seq = our offset.
                             "UPDATE partitions SET owner = %s, owner_epoch = owner_epoch + 1, "
                             "lease_until = now() + make_interval(secs => %s) "
                             "WHERE partition = %s AND (owner IS NULL OR lease_until < now()) "
@@ -125,21 +132,26 @@ class Consumer:
                     return
                 try:
                     if sub is None:
+                        # Ephemeral pull consumer starting right after our committed offset. AckPolicy.NONE: NATS's own ack
+                        # state is never used; the offset lives in PostgreSQL (rule R2).
                         sub = await self.js.pull_subscribe(
                             subject(o.partition), durable=None, stream=config.STREAM,
                             config=ConsumerConfig(deliver_policy=DeliverPolicy.BY_START_SEQUENCE,
                                                   opt_start_seq=o.stream_seq + 1, ack_policy=AckPolicy.NONE,
                                                   inactive_threshold=60.0, max_waiting=8))
                     try:
+                        # Up to CONSUMER_BATCH messages, in stream order. Timeout = nothing new for 1 s.
                         msgs = await sub.fetch(config.CONSUMER_BATCH, timeout=1.0)
                     except asyncio.TimeoutError:
                         continue
+                    # Defensive: never hand the ledger a message at or below the committed offset.
                     msgs = [m for m in msgs if m.metadata.sequence.stream > o.stream_seq]
                     if not msgs:
                         continue
                     if conn is None or conn.closed:
                         conn = await asyncio.to_thread(db.connect, False, "consumer-apply")
                         await asyncio.to_thread(self._session_setup, conn)
+                    # The transaction runs in a worker thread so this event loop (heartbeats, other partitions) never blocks.
                     ok = await asyncio.to_thread(self.apply, conn, o, msgs)
                     if not ok:
                         log.warning("fenced: partition owned by someone else", extra={"partition": o.partition,
@@ -152,6 +164,8 @@ class Consumer:
                 except (psycopg.OperationalError, psycopg.InterfaceError) as e:
                     log.warning("db error, will retry batch", extra={"partition": o.partition, "error": str(e)[:200]})
                     conn = None
+                    # The batch rolled back (or we don't know): drop the subscription; the next loop re-reads from
+                    # o.stream_seq + 1. Re-reading is always safe because the ledger guard ignores what it already has.
                     sub = await self._reset_sub(sub)        # re-read from the committed offset
                     await asyncio.sleep(1)
                 except asyncio.CancelledError:
@@ -182,12 +196,16 @@ class Consumer:
 
     def apply(self, conn: psycopg.Connection, o: Owned, msgs) -> bool:
         """One batch, one transaction. Returns False if we no longer own the partition."""
+        # Each message body is the raw BOSP frame the reader received (DATA, NOTICE or GAP_FILL).
         frames = [ledger.decode(m.data) for m in msgs]
         last = msgs[-1].metadata.sequence.stream
         lag = msgs[-1].metadata.num_pending
         t0 = time.perf_counter()
         with conn.transaction():
             cur = conn.cursor()
+            # FENCE. Lock our partition row, but only if we still own it with the same epoch. If another
+            # consumer took it over, this returns nothing and we stop. The row lock also serialises us against
+            # a concurrent takeover: the newcomer's UPDATE waits until we commit.
             cur.execute("SELECT stream_seq FROM partitions WHERE partition = %s AND owner = %s AND owner_epoch = %s "
                         "FOR UPDATE", (o.partition, self.me, o.epoch))
             row = cur.fetchone()
@@ -198,7 +216,9 @@ class Consumer:
                 # We still own the partition, so the committed offset is the truth: re-read from it.
                 o.stream_seq = row[0]
                 raise Resync()
+            # EFFECTS: the per-merchant seq guard + money rules (ledger.py).
             st = ledger.apply_batch(cur, frames)
+            # OFFSET: in the same transaction as the effects. Commit = both happened; crash = neither did.
             cur.execute("UPDATE partitions SET stream_seq = %s, lag = %s, applied = applied + %s, "
                         "dup_skipped = dup_skipped + %s, gap_dropped = gap_dropped + %s, "
                         "lease_until = greatest(lease_until, now() + make_interval(secs => %s)) "

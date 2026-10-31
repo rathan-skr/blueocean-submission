@@ -53,6 +53,9 @@ async def balance(merchant_id: str, as_of: str | None = Query(default=None)):
         return {"merchant_id": merchant_id, "currency": (r[0] or None), "settled_minor": r[1], "held_minor": r[2],
                 "available_minor": r[1] - r[3], "last_seq": r[4]}
     try:
+        # Point in time: the journal row of the LAST event at or before as_of carries the balance after it.
+        # Served by index ledger_entries_asof (merchant_id, event_time DESC, seq DESC) INCLUDE (balances):
+        # one index-only probe, however many rows the table has. No row = before the first event = zeros.
         r = await q("SELECT settled_after, held_after, reserve_after FROM ledger_entries "
                     "WHERE merchant_id = %s AND event_time <= %s::timestamptz "
                     "ORDER BY event_time DESC, seq DESC LIMIT 1", (merchant_id, as_of), one=True)
@@ -64,10 +67,12 @@ async def balance(merchant_id: str, as_of: str | None = Query(default=None)):
 
 @app.get("/v1/platform/balances")
 async def platform_balances():
+    # Platform fees are kept per merchant (no single hot row every capture would contend on); sum on read.
     rows = await q("SELECT currency, sum(fees)::bigint FROM merchants WHERE currency IS NOT NULL GROUP BY currency")
     return {cur.strip(): int(total) for cur, total in rows if total}
 
 
+# Internal states 'sending' and 'unknown' are still "not finished" to the outside world.
 _PUBLIC_STATUS = {"pending": "pending", "sending": "pending", "unknown": "pending",
                   "paid": "paid", "failed": "failed", "rejected": "rejected"}
 

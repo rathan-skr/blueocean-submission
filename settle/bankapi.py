@@ -53,17 +53,21 @@ def classify_post(status: int | None, body: dict | None, headers: dict | None, e
     err = body.get("error")
     if exc is not None:
         # Failing to CONNECT means the request never left us: definitively not executed.
+        # No response at all. If we never connected, the request never reached the bank: definitely not
+        # executed. Anything later (read timeout, dropped connection) may have committed: ambiguous.
         if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
             return Outcome(Kind.RETRY, "connect_error", None, delay=2.0)
         return Outcome(Kind.AMBIGUOUS, "timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error")
     if status == 201:
         return Outcome(Kind.PAID, "executed", status, bank_payout_id=body.get("payout_id"))
+    # Replay of a stored answer for the same key + body: the original execution, not a new one.
     if status == 200 and str(headers.get("Idempotent-Replayed", "")).lower() == "true":
         return Outcome(Kind.PAID, "replayed", status, bank_payout_id=body.get("payout_id"))
     if status == 401:
         return Outcome(Kind.RETRY, "invalid_token", status, token_rejected=True)
     if status == 409 and err == "too_many_inflight":
         return Outcome(Kind.RETRY, "too_many_inflight", status, delay=1.0)
+    # Another request with this key is still being processed: it may yet commit.
     if status == 409 and err == "request_in_progress":
         return Outcome(Kind.AMBIGUOUS, "request_in_progress", status)
     if status == 422 and err == "account_closed":
@@ -81,6 +85,7 @@ def classify_post(status: int | None, body: dict | None, headers: dict | None, e
         return Outcome(Kind.RETRY, "maintenance", status, delay=_retry_after(headers, 30.0))
     if status == 503 and err == "upstream_unavailable":
         return Outcome(Kind.RETRY, "upstream_unavailable", status, delay=1.0)
+    # 502 bad_gateway is sent AFTER the bank committed (BANK-API.md): money probably moved.
     if status == 502:
         return Outcome(Kind.AMBIGUOUS, "bad_gateway", status)
     return Outcome(Kind.AMBIGUOUS, f"unexpected_{status}", status)

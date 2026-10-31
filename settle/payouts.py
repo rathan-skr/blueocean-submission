@@ -69,6 +69,8 @@ class Executor:
         """Lease up to n due payouts to this executor (SKIP LOCKED: executors never wait on each other).
         Returns (id, status, account, currency, amount, key_gen, seconds since attempt start, attempts)."""
         cur = await self.x(
+            # Due = not finished, its next_attempt_at has passed, and nobody holds a live lease on it.
+            # 'sending' rows only qualify once their owner's lease expired, i.e. that executor died mid-attempt.
             "UPDATE payouts p SET lease_owner = %s, lease_until = now() + make_interval(secs => %s) "
             "FROM (SELECT payout_id FROM payouts WHERE status IN ('pending', 'sending', 'unknown') "
             "      AND next_attempt_at <= now() AND (lease_until IS NULL OR lease_until < now()) "
@@ -99,6 +101,7 @@ class Executor:
     async def run(self):
         asyncio.create_task(self.listen())
         while not self.stop.is_set():
+            # Keep up to PAYOUT_WORKERS payouts in progress at once; each runs as its own task.
             free = config.PAYOUT_WORKERS - len(self.busy)
             rows = []
             if free > 0:
@@ -113,6 +116,7 @@ class Executor:
             if not rows:
                 self.wake.clear()
                 try:
+                    # Nothing due: sleep until a NOTIFY (new payout) or 0.5 s, whichever comes first.
                     await asyncio.wait_for(self.wake.wait(), 0.5)
                 except asyncio.TimeoutError:
                     pass
@@ -134,8 +138,12 @@ class Executor:
         pid, status, account, currency, amount, key_gen, since_attempt, attempts = row
         p = {"payout_id": pid, "account": account, "currency": currency.strip() if currency else currency,
              "amount": amount, "key_gen": key_gen, "attempts": attempts}
+        # Local deadline (monotonic): a POST may only START before it, so that even a POST that takes the full
+        # request timeout still finishes inside our 60 s lease. Same self-fencing idea as the reader.
         deadline = claimed_at + config.PAYOUT_LEASE_S - config.BANK_REQUEST_TIMEOUT_S - 5
         try:
+            # A previous attempt MAY have moved money (ambiguous answer, or its executor died). Never POST again
+            # until the bank's own record says it did not (rule R8).
             if status in ("sending", "unknown"):
                 done = await self.reconcile(p, status, since_attempt, deadline)
                 if done:
@@ -157,6 +165,8 @@ class Executor:
         """One POST attempt: account slot -> rate slot -> token -> write-ahead `sending` (committed)
         -> POST -> classify -> next status. The write-ahead must stay BEFORE the POST (rule R8)."""
         pid, account = p["payout_id"], p["account"]
+        # Bank allows 2 in-flight payouts per destination account across ALL callers. If the account is busy,
+        # hand the payout back with a short delay instead of blocking a worker.
         slot = await self.slots.try_acquire(account)
         if slot is None:                              # account busy across the fleet
             await self.release(pid, "pending", 0.5, key_gen=p["key_gen"])
@@ -168,9 +178,13 @@ class Executor:
             token = await self.tokens.get()
             if time.monotonic() > deadline:
                 raise LeaseExpired()
+            # Idempotency key: stable for this attempt generation; key_gen only increases after a search PROVED
+            # the previous generation did not execute. (The shared OAuth token above: minting a new one revokes the
+            # old one for every executor, so all executors share one via Redis.)
             key = f"{pid}#{p['key_gen']}"
             # write-ahead: from here on, nobody may assume this payout was not sent
             cur = await self.x(
+                # Fenced on our lease AND on enough lease left to cover the whole request. Committed before the POST.
                 "UPDATE payouts SET status = 'sending', key_gen = %s, attempts = attempts + 1, "
                 "attempt_started_at = now(), updated_at = now() "
                 "WHERE payout_id = %s AND lease_owner = %s AND lease_until > now() + make_interval(secs => %s)",
@@ -178,11 +192,14 @@ class Executor:
             if cur.rowcount != 1:
                 raise LeaseExpired()
             body = {"reference": pid, "account": account, "amount_minor": p["amount"], "currency": p["currency"]}
+            # The only line that can move money.
             out: Outcome = await self.bank.post_payout(token, key, body)
         finally:
             await self.slots.release(account, slot)
+        # Audit every exchange (payout_attempts): feeds the "bank error classes" view and post-incident analysis.
         await self.record(pid, "post", key, out.label, out.http_status)
         extra = {"payout_id": pid, "idem_key": key, "outcome": out.label, "http_status": out.http_status}
+        # Map the outcome to the next status. Each release() is fenced on lease_owner.
         if out.kind is Kind.PAID:
             await self.release(pid, "paid", 0, bank_payout_id=out.bank_payout_id, reason=None)
             log.info("payout paid", extra=extra)
@@ -195,6 +212,7 @@ class Executor:
             await self.release(pid, "pending", out.delay, reason=out.reason)
             log.info("payout not executed, will retry", extra={**extra, "delay_s": out.delay})
         else:
+            # AMBIGUOUS (502, timeout, ...): park it; it will be reconciled by search after RECONCILE_AFTER_S.
             await self.release(pid, "unknown", RECONCILE_AFTER_S, reason=f"ambiguous:{out.label}")
             log.warning("payout outcome unknown, will reconcile by search", extra=extra)
 
@@ -205,6 +223,9 @@ class Executor:
         pid = p["payout_id"]
         if since_attempt is None:
             since_attempt = RECONCILE_AFTER_S          # never actually started (crash before write-ahead)
+        # A search is only trustworthy once any commit of that attempt is visible in the bank's search index:
+        # attempt start + request timeout + commit grace + index lag (8 + 5 + 3 + 2 s). Too early = we could
+        # see "not found" for a payout that is about to appear, resend, and pay twice.
         wait = RECONCILE_AFTER_S - float(since_attempt)
         if wait > 0:                                   # a commit of that attempt might not be visible yet
             await self.release(pid, "unknown", wait)
@@ -213,6 +234,7 @@ class Executor:
             await self.release(pid, status, 0.5)
             return True
         token = await self.tokens.get()
+        # GET /v1/payouts?reference=<payout_id>: the bank's own ledger is the source of truth here.
         res = await self.bank.search(token, pid)
         if res[0] != "ok":
             if res[0] == "token":
@@ -222,9 +244,11 @@ class Executor:
             return True
         rows = res[1]
         await self.record(pid, "search", None, f"found_{min(len(rows), 2)}", 200)
+        # Not executed -> the caller (work) sends again with key_gen + 1.
         if len(rows) == 0:
             log.info("search: not executed, resending with a new key", extra={"payout_id": pid})
             return False
+        # More than one execution: a double payment already happened (we can only DETECT it here). Alert loudly.
         if len(rows) > 1:
             log.critical("DOUBLE PAYMENT DETECTED", extra={"payout_id": pid, "bank_rows": [r["payout_id"] for r in rows]})
         await self.release(pid, "paid", 0, bank_payout_id=rows[0]["payout_id"],

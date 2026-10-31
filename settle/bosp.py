@@ -37,8 +37,10 @@ class FrameDecoder:
             if len(self._buf) < 4:
                 return out
             n = int.from_bytes(self._buf[:4], "big")
+            # A length outside 1..64 KiB means the stream is corrupt: the caller must drop the connection.
             if n <= 0 or n > MAX_FRAME:
                 raise FrameError(f"bad frame length {n}")
+            # Body not complete yet: keep the bytes and wait for the next chunk.
             if len(self._buf) < 4 + n:
                 return out
             out.append(bytes(self._buf[4:4 + n]))
@@ -67,9 +69,11 @@ class ChannelSequencer:
     RESEND from `expected`. That is harmless when nothing was lost: it rewinds the server's
     cursor to where it already is.
     """
+    # Next seq we can accept (= last applied + 1 at session start).
     expected: int
     resend_timeout: float = 2.0
     idle_probe: float = 4.0
+    # from_seq of the RESEND we are waiting on (None = no gap outstanding), and when we sent it.
     resend_from: int | None = None
     resend_at: float = 0.0
     last_frame_at: float = 0.0
@@ -84,18 +88,22 @@ class ChannelSequencer:
         """Classify one sequenced frame. Returns (verdict, resend_from_or_None)."""
         self.last_frame_at = now
         if ftype == "GAP_FILL":
+            # A GAP_FILL stands for the whole range [seq, new_seq - 1]; a DATA/NOTICE frame for just [seq, seq].
             lo, hi = seq, int(new_seq) - 1
         else:
             lo = hi = seq
         self.highest_seen = max(self.highest_seen, hi)
+        # Entirely behind us: already have it.
         if hi < self.expected:
             self.dups += 1
             return DUP, None
+        # Starts at (or before) the next expected seq: accept, jump past its end.
         if lo <= self.expected:
             self.expected = hi + 1
             if self.resend_from is not None and self.expected > self.resend_from:
                 self.resend_from = None             # the gap is filled
             return ACCEPT, None
+        # Starts after the next expected seq: something in between was lost on the wire.
         self.gaps += 1
         if self.resend_from is None or now - self.resend_at >= self.resend_timeout:
             return GAP, self._resend(now)
@@ -107,6 +115,7 @@ class ChannelSequencer:
             if now - self.resend_at >= self.resend_timeout:   # the resend (or its answer) was lost
                 return self._resend(now)
             return None
+        # Silent channel: maybe its last frames were lost. Probe at most once per idle_probe seconds.
         if now - self.last_frame_at >= self.idle_probe and now - self.last_probe_at >= self.idle_probe:
             self.last_probe_at = now
             self.probes += 1

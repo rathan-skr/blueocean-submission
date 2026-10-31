@@ -21,6 +21,9 @@ import redis.asyncio as aioredis
 
 log = logging.getLogger("limiter")
 
+# Sliding-window rate limit, executed atomically inside Redis (a Lua script runs without interleaving).
+# Uses Redis's own clock (TIME), so executors on hosts with skewed clocks still agree. The sorted set holds
+# one member per admitted request, scored by its time; anything older than the window is trimmed first.
 # KEYS[1]=window key; ARGV: limit, window_ms, member. Returns 0 if admitted, else ms to wait.
 _WINDOW_LUA = """
 local t = redis.call('TIME')
@@ -37,6 +40,8 @@ local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
 return math.max(1, tonumber(oldest[2]) + win - now)
 """
 
+# Counting semaphore per bank account. Each slot is a member scored by its EXPIRY time, so a slot held by
+# an executor that crashed frees itself after ttl_ms (no manual cleanup needed).
 # KEYS[1]=slots key; ARGV: limit, ttl_ms, member. Returns 1 if a slot was taken.
 _SLOT_LUA = """
 local t = redis.call('TIME')
@@ -113,8 +118,11 @@ class TokenCache:
                 raw = await self.r.get(self.KEY)
                 if raw:
                     tok, exp = json.loads(raw)
+                    # Reuse the shared token unless it expires within 5 s (avoid sending one that dies in flight).
                     if exp - time.time() > 5:
                         return tok
+                # Only ONE executor may mint: every mint revokes the previous token for everyone, and the bank allows
+                # one mint per 5 s. The lock auto-expires (8 s) if its holder dies.
                 got_lock = await self.r.set(self.LOCK, "1", nx=True, px=8000)
             except Exception:
                 return await self._get_local()          # Redis down: per-process token (slower, still safe)

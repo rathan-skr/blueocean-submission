@@ -59,6 +59,9 @@ class Lease:
         return self.conn
 
     async def try_acquire(self) -> bool:
+        """Take the lease if it is free or expired. Every takeover increments `epoch` (the fencing token)."""
+        # t0 is taken BEFORE the round trip, so our local deadline is conservative: we always believe the
+        # lease ends a little earlier than the database does (and 1 s more, for clock-rate differences).
         t0 = time.monotonic()
         try:
             c = await self._conn()
@@ -79,6 +82,7 @@ class Lease:
         return False
 
     async def renew(self) -> bool:
+        """Extend the lease - only if it is still ours (compare-and-set on holder AND epoch)."""
         t0 = time.monotonic()
         try:
             c = await self._conn()
@@ -90,12 +94,15 @@ class Lease:
         except Exception as e:
             log.warning("lease renew failed", extra={"error": repr(e)[:200], "lease_epoch": self.epoch})
             self.conn = None
-            return time.monotonic() < self.deadline       # keep going until the local deadline
+            # Database unreachable: we can't renew, but nobody else can take over either. Keep working only
+            # until our local deadline; after that valid() turns False and the session stops itself.
+            return time.monotonic() < self.deadline
         if ok:
             self.deadline = t0 + config.READER_LEASE_TTL_S - 1.0
         return ok
 
     def valid(self) -> bool:
+        """Cheap, no I/O: safe to call before every publish from the event loop."""
         return self.epoch is not None and time.monotonic() < self.deadline
 
     async def record_session(self, session_epoch: int):
@@ -107,6 +114,7 @@ class Lease:
             self.conn = None
 
     async def release(self):
+        """Expire our lease now (clean shutdown), so a standby does not wait for the TTL."""
         try:
             c = await self._conn()
             await c.execute("UPDATE reader_lease SET expires_at = now(), holder = NULL WHERE name = 'bosp' "
@@ -119,9 +127,15 @@ class Lease:
 class Session:
     def __init__(self, nc, lease: Lease, metrics: dict, n: int):
         self.nc, self.lease, self.metrics = nc, lease, metrics
+        # Each session gets its own reply-inbox prefix, so a late PubAck from a previous session can never
+        # be mistaken for one of ours (it arrives on a subject we no longer subscribe to).
         self.inbox = f"_INBOX.reader.{config.INSTANCE_ID.replace(':', '-').replace('.', '-')}.{n}"
+        # pending: publish number -> (channel, sent_at), for publishes not yet acked by NATS. It is ordered,
+        # so the first entry is always the oldest: the PubAck-timeout check in _timers only looks at it.
         self.pending: collections.OrderedDict[int, tuple[str, float]] = collections.OrderedDict()
         self.ack_n = 0
+        # Set by on_ack (a callback, outside the recv loop) when NATS rejects a publish; the recv loop
+        # checks it on every chunk and ends the session, which makes the gateway resend from last_seq.
         self.failed: str | None = None
         self.seq: dict[str, bosp.ChannelSequencer] = {}
         self.credit: dict[str, bosp.CreditLedger] = {}
@@ -145,6 +159,7 @@ class Session:
         """NATS PubAck for one publish. Only now is the frame durable, so only now is its credit returned
         to the gateway (rule R4). An error ack marks the session failed; the recv loop then ends it."""
         try:
+            # The reply subject is "<inbox>.<n>": n tells us which publish this ack belongs to.
             n = int(msg.subject.rsplit(".", 1)[1])
         except ValueError:
             return
@@ -155,6 +170,8 @@ class Session:
         if msg.data:
             try:
                 body = json.loads(msg.data)
+                # A good PubAck is {"stream": "LEDGER", "seq": <stream seq>}. An error JSON, or an empty body
+                # (NATS "no responders" status when the stream is down), means the frame is NOT stored.
                 ok = "error" not in body and "seq" in body
             except ValueError:
                 ok = False
@@ -162,6 +179,7 @@ class Session:
             self.failed = f"publish rejected: {msg.data[:120]!r} {msg.headers}"
             return
         ch = entry[0]
+        # Durable now -> this frame's credit may go back to the gateway (batched by CreditLedger).
         if self.writer is not None and not self.writer.is_closing():
             self.give_credit(ch, self.credit[ch].settle())
 
@@ -171,13 +189,18 @@ class Session:
         run the receive loop and the timers until anything ends the session (raises)."""
         reader, self.writer = await asyncio.wait_for(
             asyncio.open_connection(config.GATEWAY_HOST, config.GATEWAY_PORT, limit=1 << 20), 5)
+        # Subscribe to our acks BEFORE publishing anything in this session.
         sub = await self.nc.subscribe(self.inbox + ".*", cb=self.on_ack)
         try:
+            # 1. LOGON. `resume` = last fully applied seq per channel; the gateway restarts each channel
+            #    from resume+1 (channels we omit restart from 1).
             self.send({"type": "LOGON", "client_id": config.GATEWAY_CLIENT_ID, "secret": config.GATEWAY_SECRET,
                        "resume": resume})
             await self.writer.drain()
             dec = bosp.FrameDecoder()
             ack = await self._read_one(reader, dec, timeout=5)
+            # 2. Rejected (e.g. "throttled": more than 1 logon/s): wait as told, then let main() retry.
+            #    Never crash on this (incumbent defect #30).
             if ack.get("type") == "LOGON_REJECT":
                 wait = ack.get("retry_after_ms", 1000) / 1000
                 log.warning("logon rejected", extra={"reason": ack.get("reason")})
@@ -187,19 +210,24 @@ class Session:
                 raise SessionEnded(f"unexpected {ack.get('type')}")
             self.session_epoch = ack["session_epoch"]
             self.hb = ack["heartbeat_ms"] / 1000
+            # 3. Credit starts at 0 on every channel in every session; grant our window up front.
+            #    We never exceed the gateway's max_outstanding_credit (it would end the session).
             window = min(config.CREDIT_WINDOW, int(ack["max_outstanding_credit"]))
             now = time.monotonic()
             for ch in ack["channels"]:
+                # The sequencer expects exactly the frame after what is applied.
                 self.seq[ch] = bosp.ChannelSequencer(resume.get(ch, 0) + 1, config.RESEND_TIMEOUT_S,
                                                      config.IDLE_PROBE_S, last_frame_at=now, last_probe_at=now)
                 self.credit[ch] = bosp.CreditLedger(window, min(config.CREDIT_REFILL_AT, window))
                 self.send({"type": "CREDIT", "channel": ch, "n": window})
             await self.writer.drain()
+            # 4. Record the gateway's session_epoch next to our lease epoch (shown in /v1/ops/status).
             await self.lease.record_session(self.session_epoch)
             self.metrics.update(session_epoch=self.session_epoch, session_started=time.time(),
                                 lease_epoch=self.lease.epoch)
             log.info("session up", extra={"session_epoch": self.session_epoch, "lease_epoch": self.lease.epoch,
                                           "channels": len(self.seq), "resumed_from": sum(resume.values())})
+            # 5. Run until something ends the session. Every ending raises; main() then reconnects.
             timer = asyncio.create_task(self._timers())
             try:
                 await self._recv_loop(reader, dec)
@@ -224,6 +252,7 @@ class Session:
                 raise SessionEnded("closed during logon")
             frames = dec.feed(chunk)
             if frames:
+                # The gateway may have sent data right behind the LOGON_ACK in the same TCP chunk.
                 if len(frames) > 1:  # anything after LOGON_ACK is processed by the main loop
                     self._early = frames[1:]
                 return json.loads(frames[0])
@@ -236,6 +265,7 @@ class Session:
         while True:
             if self.failed:
                 raise SessionEnded(self.failed)
+            # Read whatever TCP gives us; FrameDecoder reassembles frames across chunk boundaries.
             chunk = await reader.read(1 << 16)
             if not chunk:
                 raise SessionEnded("gateway closed connection")
@@ -256,17 +286,25 @@ class Session:
                 s = self.seq.get(ch)
                 if s is None:
                     raise SessionEnded(f"frame for unknown channel {ch}")
+                # Every sequenced frame the gateway wrote cost one credit, whatever we do with it.
                 self.credit[ch].received()
                 m["frames"][t] += 1
+                # ACCEPT = the next frame in order, DUP = already have it, GAP = something before it was lost.
                 verdict, resend = s.on_frame(t, f["seq"], f.get("new_seq"), time.monotonic())
                 if verdict == bosp.ACCEPT:
                     if not self.lease.valid():
+                        # Fence (rule R5): checked before EVERY publish. A process that was paused (SIGSTOP, GC) past its
+                        # lease wakes up here with an expired local deadline and stops before publishing anything.
                         raise LeaseLost("local lease deadline passed")
+                    # Publish the raw bytes (no re-encoding) to the merchant's partition subject, with a reply inbox so
+                    # NATS sends a PubAck. We do NOT await the ack here: publishes are pipelined, acks arrive in on_ack.
                     self.ack_n += 1
                     self.pending[self.ack_n] = (ch, time.monotonic())
                     await self.nc.publish(subject(partition_of(ch)), raw, reply=f"{self.inbox}.{self.ack_n}")
                     m["published"] += 1
                 else:
+                    # Duplicates and frames beyond a gap are dropped; their credit goes back at once (nothing to store).
+                    # After a gap the gateway re-sends everything from the missing seq (go-back-N), so nothing is lost.
                     m["dups" if verdict == bosp.DUP else "gap_frames"] += 1
                     self.give_credit(ch, self.credit[ch].settle())
                     if resend is not None:
@@ -275,6 +313,7 @@ class Session:
                         log.info("gap, resend requested", extra={"channel": ch, "from_seq": resend, "got_seq": f["seq"],
                                                                  "session_epoch": self.session_epoch})
             elif t == "TEST_REQUEST":
+                # Must echo test_req_id: a plain HEARTBEAT does not answer a TEST_REQUEST (incumbent defect #29).
                 self.send({"type": "HEARTBEAT", "test_req_id": f.get("test_req_id")})
                 m["test_requests"] += 1
             elif t == "HEARTBEAT":
@@ -292,14 +331,18 @@ class Session:
             while True:
                 await asyncio.sleep(0.2)
                 now = time.monotonic()
+                # (a) Server silent for 2 x heartbeat -> treat the connection as dead (PROTOCOL.md 2.3).
                 if now - self.last_recv > 2 * self.hb:
                     m["silence_timeouts"] += 1
                     self.writer.close()                     # unblocks the recv loop
                     return
+                # (b) Lease deadline passed (renewals failing, or we were paused): stop even if no frame arrives.
                 if not self.lease.valid():
                     self.writer.close()
                     return
                 if self.pending:
+                    # (c) A publish NATS never acknowledged: the broker may not have it. End the session; the next one
+                    #     resumes from last_seq, so the frame is published again. (A failed publish must never be skipped.)
                     oldest = next(iter(self.pending.values()))[1]
                     if now - oldest > config.PUBACK_TIMEOUT_S:
                         self.failed = "puback timeout"
@@ -307,10 +350,12 @@ class Session:
                         self.writer.close()
                         return
                 for ch, s in self.seq.items():
+                    # (d) Lost RESENDs and tail-loss probes, per channel.
                     frm = s.tick(now)
                     if frm is not None:
                         self.send({"type": "RESEND", "channel": ch, "from_seq": frm})
                         m["resends" if s.resend_from is not None else "idle_probes"] += 1
+                # (e) Our own heartbeat, so the gateway never sees us silent (it probes after 1.5 x hb).
                 if now - self.last_sent >= self.hb / 2:
                     self.send({"type": "HEARTBEAT"})
                 await self.writer.drain()
@@ -328,6 +373,8 @@ class Session:
 async def load_resume() -> dict[str, int]:
     conn = await db.aconnect(app="reader-resume")
     try:
+        # The resume point is what the LEDGER has applied (rule R3) - never a separate checkpoint that could
+        # be ahead of it. Frames published but not yet applied simply arrive again and are dropped as duplicates.
         cur = await conn.execute("SELECT merchant_id, last_seq FROM merchants WHERE last_seq > 0")
         return {r[0]: r[1] for r in await cur.fetchall()}
     finally:
@@ -376,6 +423,7 @@ async def main():
     async def renewer():
         while lease.epoch is not None:
             await asyncio.sleep(config.READER_LEASE_RENEW_S)
+            # renew() is a compare-and-set on (holder, epoch); 0 rows = someone else took over.
             if not await lease.renew():
                 log.warning("lease lost", extra={"lease_epoch": lease.epoch})
                 lease.deadline = 0
@@ -385,11 +433,13 @@ async def main():
     while not stop.is_set():
         if not lease.valid():
             lease.epoch = None
+            # Standby: poll for the lease once a second. Failover time = lease TTL (8 s) + up to 1 s.
             if not await lease.try_acquire():
                 await asyncio.sleep(1)
                 continue
             log.info("became leader", extra={"lease_epoch": lease.epoch})
             asyncio.create_task(renewer())
+        # No point logging on while NATS is down: nothing could be made durable, so no credit could flow.
         if not nc.is_connected:
             await asyncio.sleep(0.5)
             continue
@@ -407,6 +457,7 @@ async def main():
             if task in done:
                 task.result()
             else:
+                # SIGTERM: log out cleanly; the finally below releases the lease so a standby takes over at once.
                 s.send({"type": "LOGOUT"})
                 await asyncio.sleep(0.1)
                 task.cancel()
@@ -414,6 +465,7 @@ async def main():
                 asyncio.IncompleteReadError) as e:
             log.info("session ended", extra={"reason": repr(e)[:200], "session_epoch": s.session_epoch,
                                              "lease_epoch": lease.epoch})
+            # Superseded = another logon for our client_id won. Stop considering ourselves leader.
             if isinstance(e, SessionEnded) and "superseded" in str(e):
                 lease.deadline = 0                       # someone else holds the gateway session
         except Exception:
