@@ -1,0 +1,16 @@
+# The reviewers' harsher settings (ASSIGNMENT §5.4 items 8-9), as an override:
+#   GATEWAY_EVENTS_PER_CHANNEL=10000 GATEWAY_RATE=3000 \
+#     docker compose -f docker-compose.yml -f docker-compose.review.yml up --build
+services:
+  gateway:
+    environment:
+      GATEWAY_DROP_RATE: "0.01"            # 5x the default 0.002
+      GATEWAY_DISCONNECT_MIN_S: "20"
+      GATEWAY_DISCONNECT_MAX_S: "40"
+  bank:
+    environment:
+      BANK_IDEMPOTENCY_TTL_S: "20"
+      BANK_OUTAGE_FIRST_S: "30"
+      BANK_OUTAGE_EVERY_S: "90"
+      BANK_OUTAGE_LEN_S: "30"
+      BANK_P_FAIL_AFTER_COMMIT: "0.10"

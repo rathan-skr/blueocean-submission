@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==8.*
+pytest-asyncio==0.24.*
+requests==2.*            # only to import the incumbent code in the Part C reproducers

@@ -1,0 +1,120 @@
+# One command:   docker compose up --build
+# Scale:         docker compose up -d --scale consumer=6 --scale payouts=3 --scale reader=3
+# Tests:         docker compose --profile test run --rm tests
+# Verify:        python harness/verify.py check          (host, Python 3.11+)  or: docker compose run --rm verify
+name: settlement
+
+include:
+  - harness/docker-compose.harness.yml        # gateway (7100/7101) + bank (7200), unmodified
+
+x-app: &app
+  build: .
+  image: settlement-app
+  restart: unless-stopped
+  stop_grace_period: 15s
+  environment: &env
+    DATABASE_URL: postgresql://ledger:ledger@postgres:5432/ledger
+    NATS_URL: nats://nats:4222
+    REDIS_URL: redis://redis:6379/0
+    GATEWAY_HOST: gateway
+    GATEWAY_PORT: "7100"
+    GATEWAY_SECRET: ${GATEWAY_SECRET:-bo-dev-secret}
+    BANK_URL: http://bank:7200
+  depends_on:
+    postgres: {condition: service_healthy}
+    nats: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    # synchronous_commit stays ON: a committed ledger batch (effects + offset) must survive a crash.
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=512MB",
+              "-c", "synchronous_commit=on", "-c", "wal_compression=on", "-c", "checkpoint_timeout=15min"]
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes: [natsdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz?js-enabled-only=true || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]     # deliberately NOT durable
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  reader:
+    <<: *app
+    command: ["python", "-m", "settle.reader"]
+    deploy: {replicas: 2}
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "settle.consumer"]
+    deploy: {replicas: 4}
+
+  payouts:
+    <<: *app
+    command: ["python", "-m", "settle.payouts"]
+    deploy: {replicas: 2}
+
+  api:
+    <<: *app
+    command: ["python", "-m", "settle.api"]
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/readyz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  tests:
+    <<: *app
+    restart: "no"
+    profiles: ["test"]
+    command: ["python", "-m", "pytest", "-q", "-rxX"]
+    environment:
+      <<: *env
+      TEST_ADMIN_DATABASE_URL: postgresql://ledger:ledger@postgres:5432/postgres
+      TEST_DATABASE_URL: postgresql://ledger:ledger@postgres:5432/ledger_test
+      TEST_REDIS_URL: redis://redis:6379/15
+
+  # verify.py without Python on the host:  docker compose run --rm verify   /   docker compose run --rm watch
+  verify:
+    <<: *app
+    restart: "no"
+    profiles: ["test"]
+    entrypoint: ["python", "harness/verify.py"]
+    command: ["check", "--api", "http://api:8080", "--gateway", "http://gateway:7101", "--bank", "http://bank:7200"]
+
+  watch:
+    <<: *app
+    restart: "no"
+    profiles: ["test"]
+    entrypoint: ["python", "harness/verify.py"]
+    command: ["watch", "--api", "http://api:8080", "--gateway", "http://gateway:7101"]
+
+volumes:
+  pgdata:
+  natsdata:
