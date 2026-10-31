@@ -1,0 +1,33 @@
+# Harness services. Include this file from your own docker-compose.yml:
+#
+#   include:
+#     - harness/docker-compose.harness.yml
+#
+services:
+  gateway:
+    build: .
+    command: ["python", "-u", "gateway.py"]
+    environment:
+      GATEWAY_SEED: "${GATEWAY_SEED:-42}"
+      GATEWAY_MERCHANTS: "${GATEWAY_MERCHANTS:-200}"
+      GATEWAY_EVENTS_PER_CHANNEL: "${GATEWAY_EVENTS_PER_CHANNEL:-2500}"
+      GATEWAY_RATE: "${GATEWAY_RATE:-1000}"
+      GATEWAY_CHAOS: "${GATEWAY_CHAOS:-1}"
+      GATEWAY_SECRET: "${GATEWAY_SECRET:-bo-dev-secret}"
+    ports:
+      - "7100:7100"
+      - "7101:7101"
+
+  bank:
+    build: .
+    command: ["python", "-u", "bank.py"]
+    environment:
+      BANK_SEED: "${GATEWAY_SEED:-42}"
+      BANK_MERCHANTS: "${GATEWAY_MERCHANTS:-200}"
+      BANK_CHAOS: "${BANK_CHAOS:-1}"
+      BANK_IDEMPOTENCY_TTL_S: "${BANK_IDEMPOTENCY_TTL_S:-120}"
+      BANK_OUTAGE_FIRST_S: "${BANK_OUTAGE_FIRST_S:-240}"
+      BANK_OUTAGE_EVERY_S: "${BANK_OUTAGE_EVERY_S:-600}"
+      BANK_OUTAGE_LEN_S: "${BANK_OUTAGE_LEN_S:-150}"
+    ports:
+      - "7200:7200"
