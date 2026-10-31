@@ -5,7 +5,7 @@ import asyncio
 import logging
 
 import nats
-from nats.js.api import RetentionPolicy, StorageType, StreamConfig
+from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
 from . import config
@@ -40,6 +40,7 @@ async def ensure_stream(js) -> None:
     """One stream, one subject per partition. File storage; R1 locally (R3 in production)."""
     cfg = StreamConfig(name=config.STREAM, subjects=[f"{config.SUBJECT_PREFIX}.*"],
                        retention=RetentionPolicy.LIMITS, storage=StorageType.FILE,
+                       discard=DiscardPolicy.NEW,   # full -> reject publishes (backpressure), never drop unread data
                        max_age=float(config.STREAM_MAX_AGE_S), num_replicas=1)
     # NB: we deliberately do NOT set Nats-Msg-Id on publishes. Broker-side dedup would silently drop
     # a legitimate re-publish (after a reader reconnect) of a frame whose first copy a consumer had
