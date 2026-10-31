@@ -32,14 +32,22 @@ def _fast_sleep(_s):
     time.sleep(0.05)
 
 
+def _quietly(fn, *args):
+    """Run incumbent code in a thread; the SystemExit we use to stop its retry loop is expected."""
+    try:
+        return fn(*args)
+    except SystemExit:
+        return None
+
+
 def run_incumbent(url):
     STOP.clear()
     mod = load("payouts", BANK_URL=url, BANK_CLIENT_SECRET="bo-bank-dev-secret", REDIS_URL=TEST_REDIS_URL)
     mod.acquire_rate_slot = lambda limit=20: None
     mod.time = types.SimpleNamespace(sleep=_fast_sleep, time=time.time)
     result = {}
-    t = threading.Thread(target=lambda: result.update(mod.send_payout(
-        {"payout_id": "M-0001:9", "bank_account": CLOSED, "amount": 5.0, "currency": "USD"})), daemon=True)
+    t = threading.Thread(target=lambda: result.update(_quietly(mod.send_payout, {
+        "payout_id": "M-0001:9", "bank_account": CLOSED, "amount": 5.0, "currency": "USD"}) or {}), daemon=True)
     t.start()
     t.join(3)
     STOP.set()
